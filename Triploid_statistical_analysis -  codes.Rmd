@@ -1,0 +1,902 @@
+---
+title: "Triploid paper analysis"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+date: "2023-12-20"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, warning = FALSE, echo=TRUE, message=FALSE)
+```
+
+
+
+### Load required packages
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(stringr)
+library (readr)
+library (readxl)
+library (ggplot2)
+library (openxlsx)
+library (Cairo)
+library (ggplot2)
+library (prevalence)
+library (karyoploteR)
+library(ggthemes)
+library (ggh4x)
+library(reshape2)
+library (mgcv)
+library(lme4)
+library(extrafont)
+library(gridExtra)
+library (karyoploteR)
+library (syntenyPlotteR)
+```
+
+### Set themes for  ggplot2
+
+```{r}
+# Define custom theme
+custom_theme <- function() {
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, family = "Arial", face = "bold", size = 8),
+    axis.text.y = element_text(family = "Arial", face = "bold", size = 8),
+    axis.title.x = element_text(family = "Arial", face = "bold", size = 10),
+    axis.title.y = element_text(family = "Arial", face = "bold", size = 10),
+    text = element_text(family = "Arial"),
+    legend.text = element_text(family = "Arial"),
+    legend.title = element_text(family = "Arial", face = "bold")
+  )
+}
+
+# Apply custom theme
+theme_set(custom_theme())
+
+#Define colours
+
+
+c25 <- c("dodgerblue2","#E31A1C", # red
+         "green4",
+         "#6A3D9A", # purple
+         "#FF7F00", # orange
+         "gold1",
+         "skyblue2","#FB9A99", # lt pink
+         "palegreen2",
+         "purple", # lt purple
+         "dark orange3", # lt orange
+         "gray70", "khaki2",
+         "maroon","orchid1","deeppink1","blue1","steelblue4",
+         "darkturquoise","green1","yellow4","yellow3",
+         "darkorange4","rosy brown","aquamarine", "firebrick","light pink")
+
+c25 <- apply(col2rgb(c25),2,function(x) rgb(red=x[1],green=x[2],blue=x[3],maxColorValue=255))
+
+```
+
+### Read copy number variation segments tables from AxAS and genome studio and merge segments of similar type (gain or loss) within a distance of 5kb to 50kb. Due to data restrictions only example code is provided 
+
+```{r, eval=FALSE}
+
+#Combine segments within 5-50 KB, I used increments from 5 to 50 KB and explored output each time to check if any of the samples has changed a call from being free from CNV segments >= 10 MB to become marked with this aberration. 
+
+# CNV state for 1 (loss)
+result_deletions <- array1 %>%
+  filter(Chromosome != "X") %>%
+  filter(State == 1) %>%
+  arrange(Sample.Filename, Chromosome, Start.Position) %>%
+  group_by(Sample.Filename, Chromosome) %>%
+  mutate(
+    distance_to_next = lead(Start.Position) - Stop.Position,
+    group_variable = cumsum(distance_to_next >= 40000 | is.na(distance_to_next))
+  ) %>%
+  group_by(Sample.Filename, Chromosome, group_variable) %>%
+  summarise(
+    start_position = min(Start.Position),
+    stop_position = max(Stop.Position),
+    combined_size = sum(Size),
+    combined_marker_count = sum(Marker.Count),
+    combined_median_log2_ratio = weighted.mean(MedianLog2Ratio, w = Size)
+  ) %>%
+  filter(combined_size >= 10000000) %>%
+  ungroup() %>%
+  select(
+    Sample.Filename,
+    Chromosome,
+    start_position,
+    stop_position,
+    combined_size,
+    combined_marker_count,
+    combined_median_log2_ratio
+  ) %>%
+  distinct()
+# CNV state of 3 (gain)
+result_gain <- array1 %>%
+  filter(Chromosome != "X") %>%
+  filter(State == 3) %>%
+  arrange(Sample.Filename, Chromosome, Start.Position) %>%
+  group_by(Sample.Filename, Chromosome) %>%
+  mutate(
+    distance_to_next = lead(Start.Position) - Stop.Position,
+    group_variable = cumsum(distance_to_next >= 40000 | is.na(distance_to_next))
+  ) %>%
+  group_by(Sample.Filename, Chromosome, group_variable) %>%
+  summarise(
+    start_position = min(Start.Position),
+    stop_position = max(Stop.Position),
+    combined_size = sum(Size),
+    combined_marker_count = sum(Marker.Count),
+    combined_median_log2_ratio = weighted.mean(MedianLog2Ratio, w = Size)
+  ) %>%
+  filter(combined_size >= 10000000) %>%
+  ungroup() %>%
+  select(
+    Sample.Filename,
+    Chromosome,
+    start_position,
+    stop_position,
+    combined_size,
+    combined_marker_count,
+    combined_median_log2_ratio
+  ) %>%
+  distinct()
+
+```
+
+
+### Reading data and filtering out neonatal loss samples
+
+```{r}
+mydata<-read.xlsx("C:/Users/ss4227/EPL/Triploid paper anlaysis/data for the paper/Triploidy data3.14.24.xlsx")
+
+#Exclude neonatal loss samples from the analysis
+mydata <- subset (mydata, phenotype != "Neonatal Loss")
+
+
+mydata <- mydata  %>%
+  select (Sample.Filename, lab_code, Tissue, Tissue_fetus_placenta, STR_combined, age_at_pathology, Breed, Breed_TB_or_not, mare_id, Mare.age.at.conception, Stallion_id, Stallion.age, Vet.ID, Stud.ID, Ploidy_status_combined, ploidy_status, Ploidy_new, Sex, SEX_Genotype_collated, ISAG_genotype, ELA_genotype, UCD_STR_Genotyping, texa_parentage_genotype, Texas_parentage)
+
+#Generate a categorical variable for gestational age
+
+mydata <- mydata %>%
+  mutate(age_at_path_cat = case_when(
+    age_at_pathology <= 55  ~ "14-55 days",
+    age_at_pathology %in% c(56:110) ~ "56-110 days",
+    age_at_pathology > 110  ~ "111 days to term"
+  ))
+
+#Generating a dichotomous outcome variable for ploidy aberrations
+mydata <- mydata %>%
+  mutate(chromosomal_aberrations = case_when(
+    ploidy_status %in% c("aneuploid", "triploid") ~ "yes",
+    ploidy_status == "diploid" ~ "no",
+    TRUE ~ NA_character_
+  ))
+table (mydata$chromosomal_aberrations)
+
+
+mydata <- mydata %>%
+  mutate(ploidy_recat = case_when(
+    grepl("mon", Ploidy_new, ignore.case = TRUE) ~ "Aneuploidy/subchromosomal",
+    grepl("tris", Ploidy_new, ignore.case = TRUE) ~ "Aneuploidy/subchromosomal",
+    grepl("normal", Ploidy_new, ignore.case = TRUE) ~ "No CNA > 10 MB",
+    grepl("trip", Ploidy_new, ignore.case = TRUE) ~ "Triploidy",
+    grepl("sub_chro", Ploidy_new, ignore.case = TRUE) ~ "Aneuploidy/subchromosomal",
+    TRUE ~ "Other"  # Default value for other cases
+  ))
+
+table (mydata$ploidy_recat)
+
+#data of unique POCs
+mydata_uniq<- mydata %>%
+  distinct(lab_code, .keep_all = T)
+
+```
+
+### Summary statistics
+
+```{r}
+table (mydata$age_at_path_cat, mydata$ploidy_status)
+
+table (mydata_uniq$age_at_path_cat, mydata_uniq$ploidy_status)
+mydata_uniq$ploidy_status <- factor (mydata_uniq$ploidy_status, levels = c ("aneuploid", "triploid", "diploid"))
+
+#proportion and CI of ploidy aberration with each age category 
+
+age1<- c (15, 40, 40)
+age1_total<- c (95, 95, 95)
+
+cbind (number = table (mydata_uniq$age_at_path_cat, mydata_uniq$ploidy_status)[2,], proportion = round(propCI(age1, age1_total, method = "wald")$p*100,2), lower95CI =  round(propCI(age1, age1_total, method = "wald")$lower*100,2), upper95CI = round(propCI(age1, age1_total, method = "wald")$upper*100,2))
+
+
+age2<- c (6, 2, 6)
+age2_total<- c (14, 14, 14)
+
+cbind (number = table (mydata_uniq$age_at_path_cat, mydata_uniq$ploidy_status)[3,], proportion = round(propCI(age2, age2_total, method = "wald")$p*100,2), lower95CI =  round(propCI(age2, age2_total, method = "wald")$lower*100,2), upper95CI = round(propCI(age2, age2_total, method = "wald")$upper*100,2))
+
+
+age3<- c (2, 0, 145)
+age3_total<- c (147, 147, 147)
+
+cbind (number = table (mydata_uniq$age_at_path_cat, mydata_uniq$ploidy_status)[1,], proportion = round(propCI(age3, age3_total, method = "wald")$p*100,2), lower95CI =  round(propCI(age3, age3_total, method = "wald")$lower*100,2), upper95CI = round(propCI(age3, age3_total, method = "wald")$upper*100,2))
+
+
+#Summary of gestational age by ploidy aberrations
+tapply (mydata_uniq$age_at_pathology, mydata_uniq$Ploidy_new, summary)
+
+#Number of unique mares, stallions, vets, studs
+
+length (unique(mydata$Stallion_id))
+length (unique(mydata$mare_id))
+length (unique(mydata$Vet.ID))
+length (unique(mydata$Stud.ID))
+
+#Breeds
+data.frame(number = table (mydata$Breed), proportion = round(prop.table(table (mydata$Breed))*100,2))
+data.frame(number = table (mydata$Breed_TB_or_not), proportion = round(prop.table(table (mydata$Breed_TB_or_not))*100,2))
+
+#Mare age
+summary (mydata_uniq$Mare.age.at.conception)
+tapply (mydata_uniq$Mare.age.at.conception, mydata_uniq$ploidy_status, summary)
+#Stallion age
+summary (mydata_uniq$Stallion.age)
+tapply(mydata_uniq$Stallion.age, mydata_uniq$ploidy_status, summary)
+```
+
+### Effect of mare and stallion age on ploidy aberrations through fitting logistic regression models using ploidy aberrations as a dichotomous outcome variable
+
+```{r}
+mydata_uniq$chromosomal_aberrations<-as.factor (mydata_uniq$chromosomal_aberrations)
+mydata_uniq$Mare.age.at.conception<-as.numeric (mydata_uniq$Mare.age.at.conception)
+mydata_uniq$Stallion.age<-as.numeric (mydata_uniq$Stallion.age)
+
+
+#Investigating the form of relationship between the log odds of ploidy aberration and stallion and mare age using generalized additive models and plotting these relationships
+
+mare_gam<-gam (chromosomal_aberrations ~ s(Mare.age.at.conception), data = mydata_uniq, method = "REML", family = "binomial")
+stallion_gam<-gam (chromosomal_aberrations ~ s(Stallion.age), data = mydata_uniq, method = "REML", family = "binomial")
+summary (mare_gam) # the smooth term is not significant meaning a linear fit is accepted
+summary (stallion_gam) #The smooth term is not significant meaning a linear fit is accepted
+plot.gam(stallion_gam,pages=1,residuals=F,all.terms=TRUE,shade=F, ylab="Log odds of GA", xlab="Stallion age (years)", col = "#67001F" , lwd=1, bty = "l", las = T)
+abline(h=0,col="#DF65B0" ,lty=2)
+
+plot.gam(mare_gam,pages=1,residuals=F, all.terms=TRUE,shade=F, ylab="Log odds of GA", xlab="Mare age (years)", col = "#A65628", lwd=1, bty = "l", las = T)
+abline(h=0,col="#E5C494" ,lty=2)
+
+#The relationship appears to be quadratic with the stallion age 
+boxplot (mydata_uniq$Stallion.age)
+
+
+#categorizing stallion age variable
+
+mydata_uniq <- mydata_uniq %>%
+  mutate(stallion.age.cat = cut(Stallion.age, 
+                           breaks = c (0, 13, 18, 27),
+                           labels = c ("<13", "13-17", ">17"), right = F))
+
+
+prop.table(table(mydata_uniq$chromosomal_aberrations, mydata_uniq$stallion.age.cat),2)*100
+
+#logistic regression
+
+mare_glm<-glm(factor(chromosomal_aberrations) ~ Mare.age.at.conception, data = mydata_uniq, family = "binomial")
+summary (mare_glm)
+
+exp(coef(mare_glm))
+exp(confint(mare_glm))
+
+
+stallion_glm<-glm(factor(chromosomal_aberrations) ~ factor (stallion.age.cat) , data = mydata_uniq, family = "binomial")
+summary (stallion_glm)
+
+exp(coef(stallion_glm))
+exp (confint(stallion_glm))
+
+#Compare mare and stallion age between chromosomal aberrations using wilcoxon rank sum test
+
+shapiro.test(mydata_uniq$Mare.age.at.conception) #both not normally distributed
+shapiro.test(mydata_uniq$Stallion.age) #both not normally distributed
+
+
+wilcox.test(mydata_uniq$Mare.age.at.conception ~ mydata_uniq$chromosomal_aberrations) # p = 0.1339
+wilcox.test(mydata_uniq$Stallion.age ~ mydata_uniq$chromosomal_aberrations) # P = 0.10
+
+
+#Testing of the random effect of stallion
+
+dat<-mydata_uniq[c("Stallion_id", "chromosomal_aberrations")]
+dat<-na.omit(dat)
+dat$chromosomal_aberrations<-as.factor(dat$chromosomal_aberrations)
+fit <- glmer(chromosomal_aberrations ~ (1 | Stallion_id), family = binomial("logit"), data = dat, nAGQ = 20)
+summary(fit)
+fita <- glm(chromosomal_aberrations ~ 1, data = dat, family = binomial("logit"))
+summary(fita)
+
+logLik(fita)-logLik(fit)
+-1.486201 * -2  
+
+pchisq(2.972402, 1, lower.tail = F)  #stallion effect not significant 0.08469601
+
+#Variance partitioning
+
+ 1.187/(1.187+3.29) #  0.2651329
+
+u0 <- ranef(fit, condVar = TRUE) 
+u0se <- sqrt(attr(u0[[1]], "postVar")[1, , ]) 
+location <-rownames(u0[[1]])
+u0tab <- cbind("location" = location, "u0" = u0[[1]], "u0se" = u0se)
+colnames(u0tab)[2] <- "u0"
+u0tab <- u0tab[order(u0tab$u0),]
+u0tab <- cbind(u0tab, c(1:dim(u0tab)[1]))
+
+u0tab <- u0tab[order(u0tab$location),]
+colnames(u0tab)[4] <- "u0rank"
+
+par(mfrow=c(1,1), mar=c(4.2,4,0.5,0.5), oma=c(0,0,0,0))
+plot(u0tab$u0rank, u0tab$u0, type = "n", xlab = "Rank of mare residuals", ylab = "Estimated mare residuals", ylim = c(-10, 10))
+segments(u0tab$u0rank, u0tab$u0 - 1.96*u0tab$u0se, u0tab$u0rank, u0tab$u0 + 1.96*u0tab$u0se, col = "blue")
+points(u0tab$u0rank, u0tab$u0, col = "blue", pch = 19 )
+abline(h = 0, col = "red")
+
+```
+
+
+### Reading data for aberrations per chromosome and plotting the results
+
+```{r}
+#reading data
+dat_chr<-read.csv ("ploidy information_per_chr.csv")
+
+#Creating a plot
+
+dat_chr_plot<-dat_chr[6:36]
+chr_melt <- melt(dat_chr_plot, measure.vars= c("Chr1", "Chr2", "Chr3", "Chr4", "Chr5", "Chr6", "Chr7", "Chr8", "Chr9", "Chr10", "Chr11", "Chr12", "Chr13", "Chr14", "Chr15", "Chr16", "Chr17", "Chr18", "Chr19", "Chr20", "Chr21", "Chr22", "Chr23", "Chr24", "Chr25", "Chr26", "Chr27", "Chr28", "Chr29", "Chr30", "Chr31"), na.rm = F)
+
+names(chr_melt) <- c ("Chromosome", "Aberration")
+
+chr_melt$Aberration<-factor(chr_melt$Aberration, levels = c("Polyploidy", "Trisomy", "Monosomy", "Subchromosomal duplication", "Subchromosomal deletion", "Subchromosomal deletion and duplication"))
+
+levels(chr_melt$Chromosome) <- 1:31
+
+chr_melt$Aberration <- as.character(chr_melt$Aberration)
+chr_melt$Aberration [which(is.na(chr_melt$Aberration))] <-"0"
+  
+
+chr_melt <- chr_melt %>%
+  count(Chromosome, Aberration) %>%
+  complete(Chromosome, Aberration, fill = list(n = 0)) %>%
+  mutate(n = ifelse(n > 5, 0, n))%>%
+  filter(Aberration != "0")
+
+chr_melt$Aberration<-factor(chr_melt$Aberration, levels = c("Polyploidy", "Trisomy", "Monosomy", "Subchromosomal duplication", "Subchromosomal deletion", "Subchromosomal deletion and duplication"))
+
+
+fill_palette <-c("#1C86EE", "#6A3D9A", "#B03060","#66C2A5", "#FC8D62",  "#36648B")
+
+p <- ggplot(data = chr_melt, aes(x = Chromosome, y = n, fill = Aberration))
+p = p + geom_bar(stat = "identity", position = "stack", width = 0.5)
+p = p + scale_y_continuous("Genomic aberrations (n)", expand = c (0, 0), limits = c (0, 5))
+p = p + scale_x_discrete("Chromosome")
+p = p + scale_fill_manual(values = fill_palette,
+                           guide = guide_legend( keywidth = 0.75, keyheight = 0.75, title = ""))
+p = p + theme(axis.text.x = element_text(size = 8, face = "italic", hjust = 1, angle = 45)) 
+p = p + guides(x = "axis_minor", y = "axis_minor")
+p = p + theme(legend.background = element_rect(fill = "white"))
+p
+
+```
+
+### Create a plot for triploid, aneuploid and diploid within each of the age category
+
+
+```{r}
+
+test <- data.frame(
+  Gestational_age = c("14-55 days", "56-110 days", "111 days-term"),
+  Aneuploidy = c(15, 6, 2),
+  Triploidy = c(40, 2, 0),
+  Normal = c(40, 6, 145)
+)
+
+# Calculate total for each age category
+test <- test %>%
+  mutate(total = rowSums(select(., -Gestational_age)))
+
+# Calculate percentage of each ploidy status for each age category
+test_percent  <- test %>%
+  mutate_at(vars(-Gestational_age, -total), ~./total)
+
+# Reshape data for plotting
+dat_chr_long <- test %>%
+  pivot_longer(cols = -c(Gestational_age, total),
+               names_to = "ploidy_status",
+               values_to = "count") %>%
+  left_join(test_percent %>%
+              pivot_longer(cols = -c(Gestational_age, total),
+                           names_to = "ploidy_status",
+                           values_to = "percentage"),
+            by = c("Gestational_age", "ploidy_status"))
+
+dat_chr_long$ploidy_status<- factor (dat_chr_long$ploidy_status, levels = c( "Triploidy", "Aneuploidy", "Normal"), labels = c("Triploidy", "Aneuploidy/subchromosomal", "No CNA > 10 MB"))
+
+dat_chr_long$Gestational_age<-factor (dat_chr_long$Gestational_age, levels = c("14-55 days", "56-110 days", "111 days-term"))
+
+# Define fill colors
+
+my_palette <- c("No CNA > 10 MB" = "#41AB5D", "Aneuploidy/subchromosomal" = "#B03060", "Triploidy" = "#1C86EE")
+
+# Plot
+p2 <- ggplot(dat_chr_long, aes(x = Gestational_age, y = percentage, fill = ploidy_status)) +
+  geom_bar(stat = "identity" , width = 0.3, alpha = 0.7) +
+  scale_fill_manual(values = my_palette, guide = guide_legend( keywidth = 0.75, keyheight = 0.75, title = "")) +
+  labs(x = "Gestational age",
+       y = "Proportion") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(data = subset(dat_chr_long, count != 0), aes(label = count), 
+            position = position_stack(vjust = 0.5), size = 3, color = "black", fontface = "bold", family = "Arial")
+p2
+
+
+```
+
+### Create boxplots for paternal and maternal age and split it by normal, aneuploidy including sub-chromosomal aberrations and triploidy 
+
+```{r}
+
+table (mydata_uniq$ploidy_recat)
+
+my_palette <- c("No CNA > 10 MB" = "#41AB5D", "Aneuploidy/subchromosomal" = "#B03060", "Triploidy" = "#1C86EE")
+df1 <- melt(mydata_uniq, id.vars=c("ploidy_recat"), measure.vars=c("Stallion.age", "Mare.age.at.conception"))
+
+df1$ploidy_recat <- factor (df1$ploidy_recat, levels = c ( "Triploidy", "Aneuploidy/subchromosomal",  "No CNA > 10 MB"))
+
+df1$variable <- factor (df1$variable, levels = c ("Stallion.age", "Mare.age.at.conception"), labels = c ("Stallion", "Mare"))
+
+p <- ggplot(data = df1, aes(y= value , x=ploidy_recat,  color = variable, fill = ploidy_recat)) + 
+  scale_y_continuous(limits = c (0, 26), breaks = c (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26))+
+  geom_boxplot(position = position_dodge(width = 0.8), alpha = 0.7) +
+  scale_fill_manual(values = my_palette, guide = guide_legend( keywidth = 0.75, keyheight = 0.75, title = "")) +
+  labs(x = "Genomic aberration",
+       y = "Parental age (years)") +
+  guides(y = "axis_minor")+
+  scale_color_manual(values = c ("#67001F" , "#FFD92F"), guide = guide_legend( keywidth = 0.75, keyheight = 0.75, title = "")) +
+  theme(axis.text.x = element_blank())
+p
+```
+
+
+### Create barplot of age at  pathology split into weeks upto 10 weeks
+
+
+```{r}
+
+mydata_uniq <- mydata_uniq %>%
+  mutate(age_by_week = cut(age_at_pathology, 
+                           breaks = seq(0, 355, by = 7),  # Breaks for each week
+                           labels = paste0(1:50)))  # Labels for each week
+
+
+mydata_uniq$ploidy_status <- factor (mydata_uniq$ploidy_status, levels = c ("aneuploid", "triploid", "diploid"))
+table (mydata_uniq$age_by_week, mydata_uniq$ploidy_status)
+
+weeks<-c ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+dat<-mydata_uniq%>%
+  filter (age_by_week %in% weeks) %>%
+  droplevels()%>%
+  filter (Ploidy_new != "Normal")
+
+table(dat$Ploidy_new)
+
+dat$Ploidy_new <- factor (dat$Ploidy_new, levels = c ("Triploidy", "Trisomy", "Monosomy", "Sub_Chromosomal"), labels = c ("Triploidy", "Trisomy", "Monosomy", "Subchromosomal"))
+
+
+dat_melt <- dat %>%
+  count(age_by_week, Ploidy_new) %>%
+  complete(age_by_week, Ploidy_new, fill = list(n = 0))
+
+
+fill_palette <-c("#1C86EE", "#6A3D9A", "#B03060","#66C2A5", "#FC8D62",  "#36648B")
+
+p <- ggplot(data = dat_melt, aes(x = age_by_week, y = n, fill = Ploidy_new))
+p = p + geom_bar(stat = "identity", position = "dodge", width = 0.7)
+p = p + scale_y_continuous("Genomic aberrations (n)", expand = c (0, 0), limits = c (0, 20))
+p = p + scale_x_discrete("Weeks of gestation")
+p = p + scale_fill_manual(values = fill_palette,
+                           guide = guide_legend( keywidth = 0.75, keyheight = 0.75, title = ""))
+p = p + guides(x = "axis_minor", y = "axis_minor")
+p = p + theme(legend.background = element_rect(fill = "white"))
+p = p + theme(axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5, family = "Arial", size = 8))
+p
+```
+
+
+### Plot inoformaton about wether triploidy poc were embryonic or not and results of morpholgical exam of embryonic ones
+
+```{r}
+df<- data.frame (
+  Fetus_present = c ("Embryonic", "Anembryonic", "Inconclusive"),
+count_fetus = c (35, 3, 4)) 
+
+df$Fetus_present <- factor (df$Fetus_present, levels = c ("Embryonic", "Anembryonic", "Inconclusive"))
+
+
+p <- ggplot(df, aes(x = "", y = count_fetus, fill = Fetus_present)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = count_fetus), position = position_stack(vjust = 0.5), color = "black", size = 4, stat = "identity") +  # Add text labels
+  labs(x = NULL, y = NULL) +
+  scale_fill_manual(values = c("#2171B5" , "#FD8D3C",  "#D9D9D9"), 
+                    guide = guide_legend( keywidth = 0.5, keyheight = 0.5, title = "")) +
+  theme_void() 
+p
+
+#Morphological assessment of 14 fetuses
+
+
+df_anomaly<- data.frame (
+  Fetus_anomlay = c ("CNS+/-CVS", "CVS + other", "Inconclusive"),
+count_anomlay = c (8, 2, 4)) # # This data summary is collated from this and previously published work see DOI: 10.1111/evj.13340
+
+df_anomaly$Fetus_anomlay <- factor (df_anomaly$Fetus_anomlay, levels = c ("CNS+/-CVS", "CVS + other", "Inconclusive"))
+
+p <- ggplot(df_anomaly, aes(x = "", y = count_anomlay, fill = Fetus_anomlay)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = count_anomlay), position = position_stack(vjust = 0.5), color = "black", size = 4, stat = "identity") +  # Add text labels
+  labs(x = NULL, y = NULL) +
+  scale_fill_manual(values = c("#9ECAE1" , "#C6DBEF",  "#F0F0F0"), 
+                    guide = guide_legend( keywidth = 0.5, keyheight = 0.5, title = "")) +
+  theme_void() 
+p
+```
+
+### Create a pie chart for distribution of sex in triploidy product of conceptus
+
+```{r}
+dat<-subset (mydata_uniq, Ploidy_new == "Triploidy" )
+
+table (dat$SEX_Genotype_collated)
+# Given data
+counts <- c(23, 19)
+categories <- c("XXX", "XXY")
+
+# Create a data frame
+pie_data <- data.frame(categories, counts)
+
+# Calculate percentages
+pie_data <- pie_data %>%
+  mutate(percentage = counts / sum(counts) * 100)
+
+# Plotting the pie chart with labels
+p<-ggplot(pie_data, aes(x = "", y = counts, fill = categories, label = paste(categories, sprintf("(%1.1f%%)", percentage)))) +
+  geom_bar(stat = "identity", width = 1, alpha = 0.6) +
+  coord_polar("y", start = 0) +
+  geom_text(position = position_stack(vjust = 0.5), color = "black") +
+  labs(fill = "Genotype") +
+  theme_void() +
+  theme(legend.position = "none")+
+  scale_fill_manual(values = c ("#B03060", "#1C86EE"))
+ p
+```
+
+### Investigate if multiple samples from the same POC had consistent genetic testing results
+ 
+```{r}
+## Examine which samples had fetal and placental tissue tested and see if the results matches up
+
+mydata_dub<-mydata %>%
+  mutate(duplicate_epl = ifelse(duplicated(lab_code) | duplicated (lab_code, fromLast = TRUE), "yes", "no"))
+
+table (mydata_dub$duplicate_epl) #86 lab codes are repeated
+length (unique (mydata_dub$lab_code[mydata_dub$duplicate_epl=="yes"])) # 41 unique POC had  multiple tissues been tested
+
+consis<- mydata_dub[c("Sample.Filename", "duplicate_epl", "Tissue", "lab_code","ploidy_status", "Ploidy_status_combined", "Tissue_fetus_placenta", "Ploidy_new", "STR_combined", "age_at_path_cat")]
+dim (consis)
+consis<-subset (consis, duplicate_epl == "yes")
+dim (consis)
+table (consis$Tissue_fetus_placenta)
+
+#creates a variable to define how many distinct lab_codes had both fetus and placenta being tested through counting number of distinct tissues in the tissue_fetus_placenta variable
+
+consis <- consis %>%
+  group_by(lab_code) %>%
+  mutate(duplicate_with_different_values = ifelse(n_distinct(Tissue_fetus_placenta) > 1, "yes", "no")) 
+
+table (consis$duplicate_with_different_values)
+
+#see if ploidy stats consistent
+
+consis_ploidy<-subset (consis, duplicate_with_different_values == "yes")
+dim (consis_ploidy)
+
+consis_ploidy<-consis_ploidy%>%
+  group_by(lab_code)%>%
+  mutate (ploidy_consistent = ifelse (n_distinct(ploidy_status )> 1, "no", "yes"))
+
+table (consis_ploidy$ploidy_consistent) #All are consistent. Note one sample contributed three tissues and the third tissue is unknown and therefore the number of theses sample is odd not even. However, theses three samples had consistent genetic testing results.
+```
+
+
+### Results of STR testing
+
+
+```{r}
+
+mydata<-mydata %>%
+  mutate(duplicate_epl = ifelse(duplicated(lab_code) | duplicated (lab_code, fromLast = TRUE), "yes", "no"))
+
+#Provide information on which type of STR samples had
+
+mydata <- mydata%>%
+  mutate (ISAG_tested = ifelse(is.na(ISAG_genotype), "no", "yes"))
+
+mydata <- mydata %>%
+  mutate (ELA_tested = ifelse(is.na(ELA_genotype), "no", "yes"))
+
+mydata <- mydata %>%
+  mutate (UCD_tested = ifelse(is.na(UCD_STR_Genotyping), "no", "yes"))
+
+mydata <- mydata %>%
+  mutate (Texas_tested = ifelse(is.na(Texas_parentage), "no", "yes"))
+
+
+
+mydata <- mydata %>%
+  mutate(STR_tests_applied = case_when(
+    ISAG_tested == "yes" & ELA_tested == "yes" & UCD_tested == "yes" & Texas_tested == "yes" ~ "All tests",
+    ISAG_tested == "yes" & ELA_tested == "yes" & UCD_tested == "yes" ~ "ISAG, ELA, and UCD",
+    ISAG_tested == "yes" & ELA_tested == "yes" & Texas_tested == "yes" ~ "ISAG, ELA, and Texas",
+    ISAG_tested == "yes" & UCD_tested == "yes" & Texas_tested == "yes" ~ "ISAG, UCD, and Texas",
+    ELA_tested == "yes" & UCD_tested == "yes" & Texas_tested == "yes" ~ "ELA, UCD, and Texas",
+    ISAG_tested == "yes" & ELA_tested == "yes" ~ "ISAG and ELA",
+    ISAG_tested == "yes" & UCD_tested == "yes" ~ "ISAG and UCD",
+    ISAG_tested == "yes" & Texas_tested == "yes" ~ "ISAG and Texas",
+    ELA_tested == "yes" & UCD_tested == "yes" ~ "ELA and UCD",
+    ELA_tested == "yes" & Texas_tested == "yes" ~ "ELA and Texas",
+    UCD_tested == "yes" & Texas_tested == "yes" ~ "UCD and Texas",
+    ISAG_tested == "yes" ~ "ISAG",
+    ELA_tested == "yes" ~ "ELA",
+    UCD_tested == "yes" ~ "UCD",
+    Texas_tested == "yes" ~ "Texas",
+    TRUE ~ "Not tested"
+  ))
+
+as.data.frame (table (mydata$STR_tests_applied)) #Many samples had been tested by multiple assays. 
+
+#subset the data to show samples with STR testing
+
+dat_str<-mydata[which(!is.na(mydata$STR_combined)),]
+length (unique (dat_str$lab_code))
+
+dim (dat_str )
+
+
+table (dat_str$ploidy_status)
+
+#There are some discrepancies between STR results and CMA. These are maninly samples with chromosomal and sub chromosomal aberrations either due to absence of markers within the chromosome, or the marker has failed for some chromosomes. 
+
+xtabs(~dat_str$STR_combined + dat_str$ploidy_status)
+xtabs(~dat_str$STR_combined + dat_str$Ploidy_new)
+
+#Create a variable that shows samples with STR testing as biallelic and  showed chromosomal aberrations on CMA.
+
+mydata_str_2 <- mydata %>%
+  filter (chromosomal_aberrations == "yes") %>%
+  filter (STR_combined == "2")
+table (mydata_str_2$STR_tests_applied, mydata_str_2$Ploidy_new)
+
+
+mydata_str_3 <- mydata %>%
+  filter (chromosomal_aberrations == "no") %>%
+  filter (STR_combined == "3")
+table (mydata_str_3$STR_tests_applied, mydata_str_3$Ploidy_new)
+
+
+dat_str<-dat_str %>%
+  mutate(duplicate_str = ifelse(duplicated(lab_code) | duplicated (lab_code, fromLast = TRUE), "yes", "no"))
+
+table (dat_str$duplicate_str)
+
+
+##See if multiple tissues from the same samples were tested by STR and see if ploidy status consistent
+
+dat_str <- dat_str %>%
+  group_by(lab_code) %>%
+  mutate(duplicate_with_different_values = ifelse(n_distinct(Tissue_fetus_placenta) > 1, "yes", "no")) #This creates a variable to tell how many distinct lab_codes had both fetus and placenta being tested through counting number of distinct tissues in the tissue_fetus_placenta variable
+
+table (dat_str$duplicate_with_different_values)
+
+#Number of samples with placental and fetus being tested
+
+length (unique (dat_str$lab_code[dat_str$duplicate_with_different_values== "yes"])) #21 samples had two different tissues tested with STR
+
+
+consis_ploidy_str<-subset (dat_str, duplicate_with_different_values == "yes")
+dim (consis_ploidy_str)
+
+consis_ploidy_str<-consis_ploidy_str%>%
+  group_by(lab_code)%>%
+  mutate (ploidy_consistent = ifelse (n_distinct(ploidy_status )> 1, "no", "yes"))
+
+table (consis_ploidy_str$ploidy_consistent) #All are consistent
+
+
+consis_ploidy_str <- consis_ploidy_str %>%
+  distinct(lab_code, .keep_all = T)
+
+table (consis_ploidy_str$ploidy_status)
+table (consis_ploidy_str$Ploidy_new)
+```
+
+
+### Creating BAF and LogR ration plots in R. Below an example code used to generate logrr adn baf plots
+
+
+```{r}
+#create horse genome using ranges
+horse_genome <- toGRanges(data.frame(Chr = paste(rep("chr", 32), c(seq(1:31), "X"), sep = ""), start=c(rep (1, 32)), end=c(188260577, 121350024, 121351753, 109462549, 96759418, 87230776, 100787686, 97563019, 85793548, 85155674, 61676917, 36992759, 43784481, 94600235, 92851403, 88962352, 80722430, 82641348, 62681739, 65343332, 58984458, 50928189, 55556184, 48288683, 40282968, 43147642, 40254690, 47348498, 34776120, 31395959, 26001039, 128206784)))
+
+kp <- plotKaryotype(genome = horse_genome, chromosomes= "all")
+
+#add centromere information
+
+horse_centromere<-read.xlsx("C:/Users/ss4227/EPL/Triploid paper anlaysis/Coordinates_satellite_arrays_EC3 centromere location.xlsx", sheet = 2) 
+
+# Add centromere rectangles
+for (i in 1:nrow(horse_centromere)) {
+  kpRect(kp, chr = horse_centromere$chr[i], x0 = horse_centromere$x0 [i], x1 = horse_centromere$x1[i],
+         col = "#E41A1C", data.panel="ideogram", border=NA, y0= horse_centromere$y0[i], y1=horse_centromere$y1[i])
+} 
+
+
+#Performing BAF plot for CORX2311 fetal sample
+
+
+baf_data <- read.table("C:/Users/ss4227/EPL/Illumina array analysis/GS_output/010_R02C02_x2311_F.txt", skip = 10, header = TRUE)
+names(baf_data) <- c("SNP name", "Sample ID", "Chr", "Position", "GT score", "B.Allele.Freq", "Log.R.Ratio", "CNV.value")
+ 
+baf_data <- baf_data %>%
+  select (Chr, B.Allele.Freq, Log.R.Ratio, Position)
+baf_data <- baf_data[baf_data$Chr %in% c(seq(1, 31), "X"), ]
+baf_data$Chr[baf_data$Chr == "X"] <- "32"
+baf_data$Chr <- factor(baf_data$Chr, levels = as.character(1:32)) #order the chromosomes by number
+baf_data <- baf_data %>%
+  filter (Chr %in% c ("24", "25", "26"))
+
+snp.data <- toGRanges(baf_data[,c("Chr", "Position", "Position", "B.Allele.Freq", "Log.R.Ratio")])
+  
+    names(mcols(snp.data)) <- c("BAF", "LRR")
+    seqlevelsStyle(snp.data) <- "UCSC"
+    head(snp.data)
+    
+pp <- getDefaultPlotParams(plot.type = 4)
+ pp$data1inmargin <- 2
+lrr.below.min <- which(snp.data$LRR < -3)
+snp.data$LRR[lrr.below.min] <- -3
+
+kp <- plotKaryotype(plot.type = 4, ideogram.plotter = NULL, plot.params = pp,
+                              genome = horse_genome , chromosomes= c ("chr24", "chr25", "chr26") )
+kpAddCytobandsAsLine(kp,lwd = 5)
+kpAxis(kp, r0=0.4, r1=0.75,lwd = 1)
+kpPoints(kp, data=snp.data, y=snp.data$BAF, cex=0.3, r0=0.4, r1=0.75, pch=16,col = "#810F7C")
+kpAxis(kp, tick.pos = c(-3, 0, 2), r0=0, r1=0.35, ymax=2, ymin=-3, lwd = 1)
+kpPoints(kp, data=snp.data, y=snp.data$LRR, cex=0.3, r0=0, r1=0.35, ymax=2, ymin=-3, pch=16,col = "blue")
+#kpPoints(kp, data=snp.data[lrr.below.min], y=snp.data[lrr.below.min]$LRR, cex=0.3, r0=0, r1=0.35, ymax=2, ymin=-3, col="red", pch=".")
+ kpAbline(kp, h=0, r0=0, r1=0.35, ymax=2, ymin=-3, col="tan4",lwd = 1)
+
+
+  for (i in 1:nrow(horse_centromere)) {
+  kpRect(kp, chr = horse_centromere$chr[i], x0 = horse_centromere$x0 [i], x1 = horse_centromere$x1[i],
+         col = "#E41A1C", data.panel="ideogram", border=NA, y0= horse_centromere$y0[i], y1=horse_centromere$y1[i])
+} 
+
+
+#performing on ALC
+
+baf_data_2 <- read.table("C:/Users/ss4227/EPL/Illumina array analysis/GS_output/010_R02C01_x2311_ALC1.txt", skip = 10, header = TRUE)
+names(baf_data_2) <- c("SNP name", "Sample ID", "Chr", "Position", "GT score", "B.Allele.Freq", "Log.R.Ratio", "CNV.value")
+ 
+baf_data_2 <- baf_data_2 %>%
+  select (Chr, B.Allele.Freq, Log.R.Ratio, Position)
+baf_data_2 <- baf_data_2[baf_data_2$Chr %in% c(seq(1, 31), "X"), ]
+baf_data_2$Chr[baf_data_2$Chr == "X"] <- "32"
+baf_data_2$Chr <- factor(baf_data_2$Chr, levels = as.character(1:32)) #order the chromosomes by number
+baf_data_2 <- baf_data_2 %>%
+  filter (Chr %in% c ("24", "25", "26"))
+
+snp.data <- toGRanges(baf_data_2[,c("Chr", "Position", "Position", "B.Allele.Freq", "Log.R.Ratio")])
+  
+    names(mcols(snp.data)) <- c("BAF", "LRR")
+    seqlevelsStyle(snp.data) <- "UCSC"
+    head(snp.data)
+    
+  
+pp <- getDefaultPlotParams(plot.type = 4)
+ pp$data1inmargin <- 2
+lrr.below.min <- which(snp.data$LRR < -3)
+snp.data$LRR[lrr.below.min] <- -3
+
+kp <- plotKaryotype(plot.type = 4, ideogram.plotter = NULL, plot.params = pp,
+                              genome = horse_genome , chromosomes= c ("chr24", "chr25", "chr26") )
+kpAddCytobandsAsLine(kp,lwd = 5)
+kpAxis(kp, r0=0.4, r1=0.75,lwd = 1)
+kpPoints(kp, data=snp.data, y=snp.data$BAF, cex=0.3, r0=0.4, r1=0.75, pch=16,col = "#810F7C")
+kpAxis(kp, tick.pos = c(-3, 0, 2), r0=0, r1=0.35, ymax=2, ymin=-3, lwd = 1)
+kpPoints(kp, data=snp.data, y=snp.data$LRR, cex=0.3, r0=0, r1=0.35, ymax=2, ymin=-3, pch=16,col = "blue")
+#kpPoints(kp, data=snp.data[lrr.below.min], y=snp.data[lrr.below.min]$LRR, cex=0.3, r0=0, r1=0.35, ymax=2, ymin=-3, col="red", pch=".")
+ kpAbline(kp, h=0, r0=0, r1=0.35, ymax=2, ymin=-3, col="tan4",lwd = 1)
+
+
+  for (i in 1:nrow(horse_centromere)) {
+  kpRect(kp, chr = horse_centromere$chr[i], x0 = horse_centromere$x0 [i], x1 = horse_centromere$x1[i],
+         col = "#E41A1C", data.panel="ideogram", border=NA, y0= horse_centromere$y0[i], y1=horse_centromere$y1[i])
+} 
+
+
+```
+
+
+### Performing synteny plot
+
+```{r}
+#conserved syntency data between horse human chromosomes are extracted from ensembl genome browser releaase 111
+
+synt<-read.xlsx("C:/Users/ss4227/EPL/Triploid paper anlaysis/data for the paper/Synteny data.xlsx")
+
+# Extract information for human chromosome
+synt$Human_chromosome_ID <- str_extract(synt$Human.chromosme, "(?<=Chr )[0-9XY]+")
+synt$Human_start_position <- as.numeric(str_extract(synt$Human.chromosme, "(?<=:)[0-9.]+")) * 1000000
+synt$Human_end_position <- as.numeric(str_extract(synt$Human.chromosme, "(?<=-)[0-9.]+")) * 1000000
+
+
+# Extract information for horse chromosome
+synt$Horse_chromosome_ID <- str_extract(synt$Horse.chromosome, "(?<=Chr )[0-9]+")
+synt$Horse_start_position <- as.numeric(str_extract(synt$Horse.chromosome, "(?<=:)[0-9.]+")) * 1000000
+synt$Horse_end_position <- as.numeric(str_extract(synt$Horse.chromosome, "(?<=-)[0-9.]+")) * 1000000
+synt$orientation <- "+"
+
+# Reorganize columns to match the required format
+synt <- synt[, c( "Horse_chromosome_ID", "Horse_start_position", "Horse_end_position", "Human_chromosome_ID", "Human_start_position", "Human_end_position","orientation")]
+
+synt$reference.sps <- "sps2"
+
+synt$target.sps <- "sps1"
+
+synt$Horse_chromosome_ID <- factor(synt$Horse_chromosome_ID, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31"))
+
+
+synt$Human_chromosome_ID <- factor(synt$Human_chromosome_ID, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22",  "X", "Y"))
+
+
+colnames(synt) <- NULL
+
+write.table(synt, "synt.txt", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+
+#chromosme length file
+
+
+horse_chr<- data.frame(Chr = c(seq(1:31)), length =c(188260577, 121350024, 121351753, 109462549, 96759418, 87230776, 100787686, 97563019, 85793548, 85155674, 61676917, 36992759, 43784481, 94600235, 92851403, 88962352, 80722430, 82641348, 62681739, 65343332, 58984458, 50928189, 55556184, 48288683, 40282968, 43147642, 40254690, 47348498, 34776120, 31395959, 26001039))
+horse_chr$species <- "sps2"
+
+
+human_chr<- data.frame(Chr = c(seq(1:22), "X", "Y"), length =c(248956422, 242193529, 198295559, 190214555, 181538259, 170805979, 159345973, 145138636, 138394717, 133797422, 135086622, 133275309, 114364328, 107043718, 101991189, 90338345, 83257441, 80373285, 58617616, 64444167, 46709983, 50818468, 156040895, 57227415))
+human_chr$species <- "sps1"
+
+dat_chr_len<-rbind (human_chr, horse_chr)
+colnames (dat_chr_len) <- NULL
+
+write.table (dat_chr_len, "dat_chr_len.txt", col.names = FALSE, row.names = FALSE, quote = FALSE, sep = "\t")
+
+theme_set(theme_void ())
+mycolors<-c("#1C86EE", "#E31A1C", "#008B00", "#6A3D9A", "#FF7F00", "#7EC0EE", "#FB9A99", "#90EE90", "#A020F0", "#CD6600", "#B3B3B3" , "#B03060", "#FF83FA", "#FF1493", "#0000FF", "#36648B", "#00CED1", "#00FF00", "#B59F31", "#CDCD09", "#7F0000", "#FFFF60" , "#7FFFD4", "#FFB6C1")
+
+draw.ideogram("synt.txt", "dat_chr_len.txt", "synteny ideogram", directory = getwd(), col = mycolors, ps = 4, h = 6, w = 2, fileformat = "png")
+```
+
+
+
